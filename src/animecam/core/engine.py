@@ -21,6 +21,7 @@ import numpy as np
 
 from animecam.config import DEFAULT_CONFIG, AppConfig
 from animecam.core.camera import SafeCamera, SafeVirtualCamera
+from animecam.core.gestures import HandGestureFSM
 
 logger = logging.getLogger("animecam.engine")
 
@@ -66,8 +67,11 @@ class CVEngine:
         self._last_fps_calc_time: float = time.perf_counter()
         self._fps_frame_counter: int = 0
 
-        # Optional pluggable processors (injected in Stages 3 & 4)
-        self.gesture_detector: Callable[[np.ndarray, int], str] | None = None
+        # Gesture Recognition FSM
+        self.gesture_fsm = HandGestureFSM(config.mediapipe)
+        self.gesture_detector: Callable[[np.ndarray, int], str | None] | None = (
+            self.gesture_fsm.process
+        )
         self.invisibility_filter: Callable[[np.ndarray], np.ndarray] | None = None
         self.clone_compositor: Callable[[np.ndarray], np.ndarray] | None = None
         self.eye_overlay_filter: Callable[[np.ndarray], np.ndarray] | None = None
@@ -119,9 +123,10 @@ class CVEngine:
             self._worker_thread.join(timeout=2.0)
             self._worker_thread = None
 
-        # Guarantee hardware release
+        # Guarantee hardware and ML resource release
         self.camera.release()
         self.virtual_cam.close()
+        self.gesture_fsm.close()
         logger.info("CVEngine stopped cleanly; hardware released.")
 
     def panic_kill(self) -> None:
@@ -250,6 +255,9 @@ class CVEngine:
 
     def _render_telemetry_hud(self, frame: np.ndarray) -> None:
         """Render debug telemetry onto the local preview frame only."""
+        # 1. Render detected hand landmarks
+        self.gesture_fsm.draw_debug_landmarks(frame)
+
         h, w = frame.shape[:2]
 
         # Top telemetry bar overlay
