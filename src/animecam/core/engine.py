@@ -22,6 +22,9 @@ import numpy as np
 from animecam.config import DEFAULT_CONFIG, AppConfig
 from animecam.core.camera import SafeCamera, SafeVirtualCamera
 from animecam.core.gestures import HandGestureFSM
+from animecam.effects.clones import ShadowCloneCompositor
+from animecam.effects.eyes import DojutsuOverlay
+from animecam.effects.invisibility import LiveBackgroundHealer
 
 logger = logging.getLogger("animecam.engine")
 
@@ -67,14 +70,24 @@ class CVEngine:
         self._last_fps_calc_time: float = time.perf_counter()
         self._fps_frame_counter: int = 0
 
-        # Gesture Recognition FSM
+        # Pluggable processors
         self.gesture_fsm = HandGestureFSM(config.mediapipe)
         self.gesture_detector: Callable[[np.ndarray, int], str | None] | None = (
             self.gesture_fsm.process
         )
-        self.invisibility_filter: Callable[[np.ndarray], np.ndarray] | None = None
-        self.clone_compositor: Callable[[np.ndarray], np.ndarray] | None = None
-        self.eye_overlay_filter: Callable[[np.ndarray], np.ndarray] | None = None
+        self.invisibility_healer = LiveBackgroundHealer(config.pipeline)
+        self.clone_compositor = ShadowCloneCompositor(config.pipeline)
+        self.dojutsu_overlay = DojutsuOverlay(config)
+
+        self.invisibility_filter: Callable[[np.ndarray], np.ndarray] | None = (
+            self.invisibility_healer.apply
+        )
+        self.clone_filter: Callable[[np.ndarray], np.ndarray] | None = (
+            self.clone_compositor.apply
+        )
+        self.eye_overlay_filter: Callable[[np.ndarray], np.ndarray] | None = (
+            lambda frame: self.dojutsu_overlay.apply(frame, self.selected_shader)
+        )
 
         # Current detected gesture combo
         self.active_combo_name: str = "Neutral"
@@ -127,6 +140,9 @@ class CVEngine:
         self.camera.release()
         self.virtual_cam.close()
         self.gesture_fsm.close()
+        self.invisibility_healer.close()
+        self.clone_compositor.close()
+        self.dojutsu_overlay.close()
         logger.info("CVEngine stopped cleanly; hardware released.")
 
     def panic_kill(self) -> None:
@@ -134,11 +150,13 @@ class CVEngine:
         logger.warning("[PANIC BUTTON] Privacy kill-switch activated!")
         self.panic_active = True
 
-        # Disable all active jutsu
+        # Disable all active jutsu and flush buffers
         self.invisibility_enabled = False
         self.clones_enabled = False
         self.eyes_enabled = False
         self.active_combo_name = "KILLED (PANIC)"
+        self.invisibility_healer.reset()
+        self.clone_compositor.reset()
 
         # Immediately send blank black frame to virtual camera to mask feed
         w, h = self.camera.resolution
@@ -212,8 +230,8 @@ class CVEngine:
             if self.invisibility_enabled and self.invisibility_filter is not None:
                 clean_output = self.invisibility_filter(clean_output)
 
-            if self.clones_enabled and self.clone_compositor is not None:
-                clean_output = self.clone_compositor(clean_output)
+            if self.clones_enabled and self.clone_filter is not None:
+                clean_output = self.clone_filter(clean_output)
 
             if self.eyes_enabled and self.eye_overlay_filter is not None:
                 clean_output = self.eye_overlay_filter(clean_output)
